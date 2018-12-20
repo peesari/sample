@@ -1,0 +1,139 @@
+---
+- name: Create a new Demo EC2 instance
+  hosts: localhost
+  gather_facts: False
+
+  vars:
+      region: us-east-1
+      instance_type: t2.micro
+      ami: ami-063aa838bd7631e0b  # Ubuntu 18.04 LTS
+      keypair: lab # pem file name
+  
+  tasks:
+
+    - name: Create an ec2 instance
+      ec2:
+         key_name: "{{ keypair }}"
+         group: lab  # security group name
+         instance_type: "{{ instance_type}}"
+         image: "{{ ami }}"
+         wait: true
+         region: "{{ region }}"
+         count: 1  # default
+         count_tag:
+            Name: Demo
+         instance_tags:
+            Name: Demo
+         vpc_subnet_id: subnet-0104a08b7d9cffddd
+
+         assign_public_ip: yes
+      register: ec2
+      creating security group
+	  
+	  - name: Create security group
+  ec2_group:
+    name: "{{ project_name }}_security_group"
+    description: "{{ project_name }} security group"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp  # ssh
+        from_port: 22
+        to_port: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp  # http
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp  # https
+        from_port: 443
+        to_port: 443
+        cidr_ip: 0.0.0.0/0
+    rules_egress:
+      - proto: all
+        cidr_ip: 0.0.0.0/0
+  register: test_firewall
+
+- name: Create an EC2 key
+  ec2_key:
+    name: "{{ project_name }}-{{ env }}-key"
+    region: "{{ region }}"
+  register: ec2_key
+
+- name: Save private key
+  copy: content="{{ ec2_key.key.private_key }}" dest="../aws-private.pem" mode=0600
+  when: ec2_key.changed
+
+- name: Create an EC2 instance
+  ec2:
+    key_name: "{{ project_name }}-{{ env }}-key"
+    region: "{{ region }}"
+    group_id: "{{ test_firewall.group_id }}"
+    instance_type: "{{ instance_type }}"
+    image: "{{ ami }}"
+    wait: yes
+    instance_tags:
+        env: "{{ env }}"
+    count_tag: env
+    exact_count: 1
+    vpc_subnet_id: subnet-66d25311
+    assign_public_ip: yes
+  register: ec2
+
+- name: Add the newly created EC2 instance(s) to host group
+  lineinfile: dest={{ hostpath }}
+              regexp={{ item.public_ip }} 
+              insertafter="[webserver]" 
+              line="{{ item.public_ip }} {{hoststring}}"
+              state=present
+  with_items: ec2.instances
+
+- wait_for: path={{ hostpath }} search_regex={{hoststring}}
+
+- name: Wait for SSH to come up
+  local_action: wait_for 
+                host={{ item.public_ip }} 
+                port=22 
+                state=started
+  with_items: ec2.instances
+    ---
+# This task installs and enables apache on webservers
+- name: ensure apache is installed
+apt: pkg=apache2 state=latest
+- name: ensure apache is running
+service: name=apache2 state=running enabled=yes
+- name: copy files to document root
+copy: src=index.html dest=/var/www/html/index.html
+- name: copy application code to document root
+template: src=index.html.j2 dest=/var/www/html/index.html
+notify: restart apache
+========================
+---
+- name: restart apache
+service: name=apache2 state=restarted
+==========================
+- name: Ensure directory exists for local self-signed TLS certs.
+  file:
+    path: /etc/letsencrypt/live/{{ server_hostname }}
+    state: directory
+
+- name: Generate an OpenSSL private key.
+  openssl_privatekey:
+    path: /etc/letsencrypt/live/{{ server_hostname }}/privkey.pem
+
+- name: Generate an OpenSSL CSR.
+  openssl_csr:
+    path: /etc/ssl/private/{{ server_hostname }}.csr
+    privatekey_path: /etc/letsencrypt/live/{{ server_hostname }}/privkey.pem
+    common_name: "{{ server_hostname }}"
+
+- name: Generate a Self Signed OpenSSL certificate.
+  openssl_certificate:
+    path: /etc/letsencrypt/live/{{ server_hostname }}/fullchain.pem
+    privatekey_path: /etc/letsencrypt/live/{{ server_hostname }}/privkey.pem
+    csr_path: /etc/ssl/private/{{ server_hostname }}.csr
+    provider: selfsigned
+	==============
+	###- name: Ensure python OpenSSL dependencies are installed.
+  pip:
+    name: pyOpenSSL
+    state: present#
